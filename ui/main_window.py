@@ -1,47 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import tkinter as tk
 from pathlib import Path
-from typing import Any, Callable
-
-from PySide6.QtCore import QDate, QUrl, Qt
-from PySide6.QtGui import QColor, QDesktopServices, QPixmap
-from PySide6.QtWebEngineCore import (
-    QWebEnginePage,
-    QWebEngineProfile,
-    QWebEngineUrlRequestInfo,
-    QWebEngineUrlRequestInterceptor,
-)
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QApplication,
-    QCheckBox,
-    QColorDialog,
-    QComboBox,
-    QDateEdit,
-    QDoubleSpinBox,
-    QFileDialog,
-    QFormLayout,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QScrollArea,
-    QSpinBox,
-    QSplitter,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QToolBar,
-    QVBoxLayout,
-    QWidget,
-)
+from tkinter import colorchooser, filedialog, messagebox, ttk
+from typing import Any
 
 from services import excel_parser
 from services.athlete_store import (
@@ -50,34 +13,82 @@ from services.athlete_store import (
     list_measurements,
     save_measurement,
 )
-from services.input_template import build_input_template, parse_lactate_sheet
+from services.input_template import (
+    build_input_template,
+    parse_lactate_sheet,
+)
+from services.win_pdf import save_report_pdf
 from services.workflow import (
     analyze,
     build_excel_bytes,
-    build_report_htmls,
+    build_report_data,
     initial_lactate_rows,
     lt_api_item,
     summary_records,
 )
+from ui.graph_canvas import GraphCanvas
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-class LocalOnlyInterceptor(QWebEngineUrlRequestInterceptor):
-    """Block all network schemes from the embedded report preview."""
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, master):
+        super().__init__(master)
+        self.canvas = tk.Canvas(
+            self,
+            background="#F4F6F8",
+            highlightthickness=0,
+        )
+        self.scrollbar = ttk.Scrollbar(
+            self,
+            orient="vertical",
+            command=self.canvas.yview,
+        )
+        self.inner = ttk.Frame(self.canvas)
+        self.window_id = self.canvas.create_window(
+            (0, 0),
+            window=self.inner,
+            anchor="nw",
+        )
 
-    def interceptRequest(self, info: QWebEngineUrlRequestInfo) -> None:
-        scheme = info.requestUrl().scheme().lower()
-        if scheme in {"http", "https", "ftp", "ws", "wss"}:
-            info.block(True)
+        self.canvas.configure(
+            yscrollcommand=self.scrollbar.set
+        )
+        self.canvas.pack(
+            side="left",
+            fill="both",
+            expand=True,
+        )
+        self.scrollbar.pack(
+            side="right",
+            fill="y",
+        )
+
+        self.inner.bind(
+            "<Configure>",
+            lambda _event: self.canvas.configure(
+                scrollregion=self.canvas.bbox("all")
+            ),
+        )
+        self.canvas.bind(
+            "<Configure>",
+            self._resize_inner,
+        )
+
+    def _resize_inner(self, event):
+        self.canvas.itemconfigure(
+            self.window_id,
+            width=event.width,
+        )
 
 
-class MainWindow(QMainWindow):
+class MainWindow(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("NGC CPET PC")
-        self.resize(1500, 950)
+        self.title("NGC CPET PC")
+        self.geometry("1500x930")
+        self.minsize(1180, 760)
 
         self.athletes: list[dict[str, Any]] = []
         self.measurements: list[dict[str, Any]] = []
@@ -85,598 +96,1451 @@ class MainWindow(QMainWindow):
         self.meta: dict[str, Any] | None = None
         self.analysis: dict[str, Any] | None = None
         self.report_data: dict[str, Any] | None = None
-        self.final_html: str | None = None
-        self.editable_html: str | None = None
         self.lactate_rows: list[dict[str, Any]] = []
+        self.lactate_entries: list[tk.Entry] = []
+        self.report_texts: dict[str, tk.Text] = {}
+        self._current_report_text: tk.Text | None = None
 
+        self._setup_style()
         self._build_ui()
         self.refresh_athletes()
 
-    # ---------- UI shell ----------
+    def _setup_style(self) -> None:
+        style = ttk.Style(self)
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            pass
+
+        style.configure(
+            "Title.TLabel",
+            font=("Malgun Gothic", 20, "bold"),
+            foreground="#123A79",
+        )
+        style.configure(
+            "Muted.TLabel",
+            font=("Malgun Gothic", 9),
+            foreground="#667085",
+        )
+        style.configure(
+            "Section.TLabel",
+            font=("Malgun Gothic", 11, "bold"),
+            foreground="#111111",
+        )
+        style.configure(
+            "TNotebook.Tab",
+            padding=(18, 9),
+            font=("Malgun Gothic", 9, "bold"),
+        )
+        style.configure(
+            "Primary.TButton",
+            font=("Malgun Gothic", 9, "bold"),
+        )
 
     def _build_ui(self) -> None:
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(18, 14, 18, 18)
-        root.setSpacing(10)
+        root = ttk.Frame(self, padding=(18, 12, 18, 16))
+        root.pack(fill="both", expand=True)
 
-        header = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title = QLabel("NGC CPET 피드백지 제작")
-        title.setStyleSheet(
-            "font-size: 24px; font-weight: 800; color: #123A79;"
+        header = ttk.Frame(root)
+        header.pack(fill="x", pady=(0, 10))
+
+        title_box = ttk.Frame(header)
+        title_box.pack(side="left")
+        ttk.Label(
+            title_box,
+            text="NGC CPET 피드백지 제작",
+            style="Title.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            title_box,
+            text=(
+                "선수 정보와 측정 자료는 외부 저장소 없이 "
+                "이 PC 안에서만 처리됩니다."
+            ),
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(3, 0))
+
+        badge = tk.Label(
+            header,
+            text="LOCAL ONLY",
+            bg="#ECFDF3",
+            fg="#067647",
+            font=("Malgun Gothic", 9, "bold"),
+            padx=10,
+            pady=5,
         )
-        subtitle = QLabel(
-            "선수 정보와 측정 자료는 외부 서버 없이 이 PC 안에서만 처리됩니다."
+        badge.pack(side="right", padx=8)
+
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True)
+
+        self.athlete_tab = ttk.Frame(
+            self.notebook,
+            padding=14,
         )
-        subtitle.setStyleSheet("color: #667085;")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-
-        local_badge = QLabel("LOCAL ONLY")
-        local_badge.setStyleSheet(
-            "background:#ECFDF3; color:#067647; padding:6px 10px;"
-            "border-radius:10px; font-weight:800;"
+        self.measurement_tab = ttk.Frame(
+            self.notebook,
+            padding=14,
         )
-
-        header.addLayout(title_box)
-        header.addStretch()
-        header.addWidget(local_badge)
-        root.addLayout(header)
-
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_athlete_tab(), "1 선수 등록")
-        self.tabs.addTab(self._build_measurement_tab(), "2 검사 입력")
-        self.tabs.addTab(self._build_analysis_tab(), "3 분석")
-        self.tabs.addTab(self._build_report_tab(), "4 결과지")
-        root.addWidget(self.tabs, 1)
-
-        self.setCentralWidget(central)
-        self.statusBar().showMessage("준비됨")
-
-    # ---------- Athlete tab ----------
-
-    def _build_athlete_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        form_box = QGroupBox("선수 등록")
-        form = QGridLayout(form_box)
-
-        self.athlete_name = QLineEdit()
-        self.athlete_sex = QComboBox()
-        self.athlete_sex.addItems(["남", "여"])
-        self.athlete_category = QComboBox()
-        self.athlete_category.addItems(
-            ["국가대표 후보", "청소년 대표", "꿈나무"]
+        self.analysis_tab = ttk.Frame(
+            self.notebook,
+            padding=14,
+        )
+        self.report_tab = ttk.Frame(
+            self.notebook,
+            padding=0,
         )
 
-        form.addWidget(QLabel("선수 이름"), 0, 0)
-        form.addWidget(QLabel("성별"), 0, 1)
-        form.addWidget(QLabel("구분"), 0, 2)
-        form.addWidget(QLabel(""), 0, 3)
-
-        form.addWidget(self.athlete_name, 1, 0)
-        form.addWidget(self.athlete_sex, 1, 1)
-        form.addWidget(self.athlete_category, 1, 2)
-
-        register_button = QPushButton("선수 등록")
-        register_button.clicked.connect(self.register_athlete)
-        form.addWidget(register_button, 1, 3)
-
-        actions = QHBoxLayout()
-        refresh_button = QPushButton("선수 목록 새로고침")
-        refresh_button.clicked.connect(self.refresh_athletes)
-        actions.addWidget(refresh_button)
-        actions.addStretch()
-
-        self.athlete_table = QTableWidget(0, 3)
-        self.athlete_table.setHorizontalHeaderLabels(
-            ["이름", "성별", "구분"]
+        self.notebook.add(
+            self.athlete_tab,
+            text="1 선수 등록",
         )
-        self.athlete_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
+        self.notebook.add(
+            self.measurement_tab,
+            text="2 검사 입력",
         )
-        self.athlete_table.setEditTriggers(
-            QAbstractItemView.NoEditTriggers
+        self.notebook.add(
+            self.analysis_tab,
+            text="3 분석",
         )
-        self.athlete_table.setSelectionBehavior(
-            QAbstractItemView.SelectRows
+        self.notebook.add(
+            self.report_tab,
+            text="4 결과지",
         )
 
-        note = QLabel(
-            "등록한 선수와 측정 기록은 data/cpet.db에 저장됩니다."
+        self._build_athlete_tab()
+        self._build_measurement_tab()
+        self._build_analysis_tab()
+        self._build_report_tab()
+
+        self.status_var = tk.StringVar(value="준비됨")
+        status = ttk.Label(
+            root,
+            textvariable=self.status_var,
+            style="Muted.TLabel",
         )
-        note.setStyleSheet("color:#667085;")
+        status.pack(fill="x", pady=(7, 0))
 
-        layout.addWidget(note)
-        layout.addWidget(form_box)
-        layout.addLayout(actions)
-        layout.addWidget(self.athlete_table, 1)
-        return page
+    # ---------- Athlete ----------
 
-    # ---------- Measurement tab ----------
+    def _build_athlete_tab(self) -> None:
+        ttk.Label(
+            self.athlete_tab,
+            text=(
+                "등록한 선수와 측정 기록은 "
+                "data/cpet.db에 저장됩니다."
+            ),
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 10))
 
-    def _build_measurement_tab(self) -> QWidget:
-        page = QWidget()
-        outer = QVBoxLayout(page)
-
-        top = QGridLayout()
-        self.measurement_athlete = QComboBox()
-        self.measurement_athlete.currentIndexChanged.connect(
-            self.on_measurement_athlete_changed
+        form = ttk.LabelFrame(
+            self.athlete_tab,
+            text="선수 등록",
+            padding=12,
         )
-        self.saved_measurement = QComboBox()
-        self.saved_measurement.currentIndexChanged.connect(
-            self.on_saved_measurement_changed
-        )
-
-        top.addWidget(QLabel("선수 선택"), 0, 0)
-        top.addWidget(QLabel("기존 측정 기록"), 0, 1)
-        top.addWidget(self.measurement_athlete, 1, 0)
-        top.addWidget(self.saved_measurement, 1, 1)
-        top.setColumnStretch(0, 1)
-        top.setColumnStretch(1, 1)
-        outer.addLayout(top)
-
-        fields_box = QGroupBox("검사 기본 정보")
-        grid = QGridLayout(fields_box)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
-
-        self.test_date = QDateEdit()
-        self.test_date.setCalendarPopup(True)
-        self.test_date.setDisplayFormat("yyyy-MM-dd")
-        self.test_date.setDate(QDate.currentDate())
-
-        self.height = self._double_spin(0.1, 1)
-        self.weight = self._double_spin(0.1, 1)
-        self.bmi = self._double_spin(0.1, 1)
-        self.vo2max = self._double_spin(0.01, 2, maximum=200)
-        self.hrmax = QSpinBox()
-        self.hrmax.setRange(0, 300)
-        self.exercise_time = QLineEdit()
-        self.exercise_time.setPlaceholderText("예: 30분")
-
-        self.load_type = QComboBox()
-        self.load_type.addItems(["Speed", "Power"])
-        self.load_type.currentTextChanged.connect(
-            self.update_load_label
-        )
-
-        self.max_load = self._double_spin(0.1, 2, maximum=5000)
-        self.grade_percent = self._double_spin(0.1, 1, maximum=100)
-        self.stage_duration = QSpinBox()
-        self.stage_duration.setRange(1, 60)
-        self.stage_duration.setValue(3)
-        self.rest_duration = QSpinBox()
-        self.rest_duration.setRange(1, 60)
-        self.rest_duration.setValue(1)
-
-        row1 = [
-            ("측정 날짜", self.test_date),
-            ("신장(cm)", self.height),
-            ("체중(kg)", self.weight),
-            ("BMI(kg/m²)", self.bmi),
-        ]
-        row2 = [
-            ("최대 산소 섭취량(ml/kg/min)", self.vo2max),
-            ("최대 심박수(beats/min)", self.hrmax),
-            ("운동 시간", self.exercise_time),
-            ("부하 단위", self.load_type),
-        ]
-        self.max_load_label = QLabel("최대 Speed(km/h)")
-
-        for col, (label, widget) in enumerate(row1):
-            grid.addWidget(QLabel(label), 0, col)
-            grid.addWidget(widget, 1, col)
-
-        for col, (label, widget) in enumerate(row2):
-            grid.addWidget(QLabel(label), 2, col)
-            grid.addWidget(widget, 3, col)
-
-        grid.addWidget(self.max_load_label, 4, 0)
-        grid.addWidget(QLabel("경사도(%)"), 4, 1)
-        grid.addWidget(QLabel("일반 운동 Stage 시간(분)"), 4, 2)
-        grid.addWidget(QLabel("Rest 시간(분)"), 4, 3)
-        grid.addWidget(self.max_load, 5, 0)
-        grid.addWidget(self.grade_percent, 5, 1)
-        grid.addWidget(self.stage_duration, 5, 2)
-        grid.addWidget(self.rest_duration, 5, 3)
+        form.pack(fill="x")
 
         for col in range(4):
-            grid.setColumnStretch(col, 1)
+            form.columnconfigure(col, weight=1)
 
-        outer.addWidget(fields_box)
-
-        action_row = QHBoxLayout()
-        save_button = QPushButton("측정 정보 저장")
-        save_button.clicked.connect(self.save_current_measurement)
-        template_button = QPushButton("Excel 입력 양식 저장")
-        template_button.clicked.connect(self.save_input_template)
-        action_row.addWidget(save_button)
-        action_row.addWidget(template_button)
-        action_row.addStretch()
-        outer.addLayout(action_row)
-
-        upload_box = QGroupBox("Excel 원자료")
-        upload_layout = QGridLayout(upload_box)
-        self.excel_path = QLineEdit()
-        self.excel_path.setReadOnly(True)
-        browse_button = QPushButton("Excel 파일 선택")
-        browse_button.clicked.connect(self.choose_excel_file)
-        parse_button = QPushButton("Excel 읽기")
-        parse_button.clicked.connect(self.parse_selected_excel)
-
-        upload_layout.addWidget(self.excel_path, 0, 0)
-        upload_layout.addWidget(browse_button, 0, 1)
-        upload_layout.addWidget(parse_button, 0, 2)
-
-        self.summary_table = QTableWidget(0, 8)
-        self.summary_table.setHorizontalHeaderLabels(
-            [
-                "Stage",
-                "Duration",
-                "HR min",
-                "HR max",
-                "HR mean",
-                "VO2 min",
-                "VO2 max",
-                "VO2 mean",
-            ]
+        ttk.Label(form, text="선수 이름").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=5,
         )
-        self.summary_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
+        ttk.Label(form, text="성별").grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=5,
         )
-        self.summary_table.setEditTriggers(
-            QAbstractItemView.NoEditTriggers
-        )
-        upload_layout.addWidget(self.summary_table, 1, 0, 1, 3)
-
-        outer.addWidget(upload_box, 1)
-        return page
-
-    # ---------- Analysis tab ----------
-
-    def _build_analysis_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        options = QHBoxLayout()
-        self.show_lt1 = QCheckBox("LT1 계산 및 표시")
-        self.show_lt1.setChecked(True)
-        self.show_lt2 = QCheckBox("LT2 계산 및 표시")
-        self.show_lt2.setChecked(True)
-        options.addWidget(self.show_lt1)
-        options.addWidget(self.show_lt2)
-        options.addStretch()
-        layout.addLayout(options)
-
-        lactate_box = QGroupBox("혈중 젖산염 입력")
-        lactate_layout = QVBoxLayout(lactate_box)
-        self.lactate_table = QTableWidget(0, 3)
-        self.lactate_table.setHorizontalHeaderLabels(
-            ["Stage", "Load", "혈중 젖산염(mmol/L)"]
-        )
-        self.lactate_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
-        lactate_layout.addWidget(self.lactate_table)
-
-        analyze_button = QPushButton("분석 실행")
-        analyze_button.clicked.connect(self.run_analysis)
-        lactate_layout.addWidget(analyze_button)
-        layout.addWidget(lactate_box)
-
-        self.lt1_result = QLabel("LT1: 분석 전")
-        self.lt2_result = QLabel("LT2: 분석 전")
-        results = QHBoxLayout()
-        results.addWidget(self.lt1_result)
-        results.addWidget(self.lt2_result)
-        layout.addLayout(results)
-
-        graph_splitter = QSplitter(Qt.Vertical)
-
-        self.lactate_graph = self._graph_panel("혈중 젖산염 그래프")
-        self.basic_graph = self._graph_panel(
-            "1페이지용 HR 및 VO2 그래프"
-        )
-        self.combined_graph = self._graph_panel(
-            "2페이지용 HR, VO2 및 Lactate 그래프"
+        ttk.Label(form, text="구분").grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=5,
         )
 
-        graph_splitter.addWidget(self.lactate_graph["container"])
-        graph_splitter.addWidget(self.basic_graph["container"])
-        graph_splitter.addWidget(self.combined_graph["container"])
-        graph_splitter.setSizes([300, 360, 360])
-        layout.addWidget(graph_splitter, 1)
-        return page
+        self.athlete_name_var = tk.StringVar()
+        self.athlete_sex_var = tk.StringVar(value="남")
+        self.athlete_category_var = tk.StringVar(
+            value="국가대표 후보"
+        )
 
-    # ---------- Report tab ----------
+        ttk.Entry(
+            form,
+            textvariable=self.athlete_name_var,
+        ).grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=5,
+            pady=5,
+        )
 
-    def _build_report_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        ttk.Combobox(
+            form,
+            textvariable=self.athlete_sex_var,
+            values=["남", "여"],
+            state="readonly",
+        ).grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=5,
+            pady=5,
+        )
 
-        toolbar = QToolBar()
-        toolbar.setMovable(False)
+        ttk.Combobox(
+            form,
+            textvariable=self.athlete_category_var,
+            values=[
+                "국가대표 후보",
+                "청소년 대표",
+                "꿈나무",
+            ],
+            state="readonly",
+        ).grid(
+            row=1,
+            column=2,
+            sticky="ew",
+            padx=5,
+            pady=5,
+        )
 
-        apply_button = QPushButton("수정 내용 적용")
-        apply_button.clicked.connect(self.apply_report_edits)
-        pdf_button = QPushButton("PDF 결과지 저장")
-        pdf_button.clicked.connect(self.save_report_pdf)
-        excel_button = QPushButton("Excel 결과 저장")
-        excel_button.clicked.connect(self.save_report_excel)
+        ttk.Button(
+            form,
+            text="선수 등록",
+            style="Primary.TButton",
+            command=self.register_athlete,
+        ).grid(
+            row=1,
+            column=3,
+            sticky="ew",
+            padx=5,
+            pady=5,
+        )
+
+        actions = ttk.Frame(self.athlete_tab)
+        actions.pack(fill="x", pady=10)
+        ttk.Button(
+            actions,
+            text="선수 목록 새로고침",
+            command=self.refresh_athletes,
+        ).pack(side="left")
+
+        columns = ("name", "sex", "category")
+        self.athlete_tree = ttk.Treeview(
+            self.athlete_tab,
+            columns=columns,
+            show="headings",
+            height=15,
+        )
+        for key, label in [
+            ("name", "이름"),
+            ("sex", "성별"),
+            ("category", "구분"),
+        ]:
+            self.athlete_tree.heading(
+                key,
+                text=label,
+            )
+            self.athlete_tree.column(
+                key,
+                anchor="center",
+                stretch=True,
+            )
+        self.athlete_tree.pack(
+            fill="both",
+            expand=True,
+        )
+
+    # ---------- Measurement ----------
+
+    def _build_measurement_tab(self) -> None:
+        selector = ttk.Frame(self.measurement_tab)
+        selector.pack(fill="x", pady=(0, 12))
+        selector.columnconfigure(0, weight=1)
+        selector.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            selector,
+            text="선수 선택",
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=5,
+        )
+        ttk.Label(
+            selector,
+            text="기존 측정 기록",
+        ).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=5,
+        )
+
+        self.measurement_athlete_var = tk.StringVar()
+        self.measurement_athlete_combo = ttk.Combobox(
+            selector,
+            textvariable=self.measurement_athlete_var,
+            state="readonly",
+        )
+        self.measurement_athlete_combo.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=5,
+            pady=5,
+        )
+        self.measurement_athlete_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.on_measurement_athlete_changed(),
+        )
+
+        self.saved_measurement_var = tk.StringVar()
+        self.saved_measurement_combo = ttk.Combobox(
+            selector,
+            textvariable=self.saved_measurement_var,
+            state="readonly",
+        )
+        self.saved_measurement_combo.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=5,
+            pady=5,
+        )
+        self.saved_measurement_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.on_saved_measurement_changed(),
+        )
+
+        fields = ttk.LabelFrame(
+            self.measurement_tab,
+            text="검사 기본 정보",
+            padding=10,
+        )
+        fields.pack(fill="x")
+        for col in range(4):
+            fields.columnconfigure(col, weight=1)
+
+        self.test_date_var = tk.StringVar(
+            value=dt.date.today().isoformat()
+        )
+        self.height_var = tk.StringVar(value="0")
+        self.weight_var = tk.StringVar(value="0")
+        self.bmi_var = tk.StringVar(value="0")
+        self.vo2max_var = tk.StringVar(value="0")
+        self.hrmax_var = tk.StringVar(value="0")
+        self.exercise_time_var = tk.StringVar()
+        self.load_type_var = tk.StringVar(value="Speed")
+        self.max_load_var = tk.StringVar(value="0")
+        self.grade_var = tk.StringVar(value="0")
+        self.stage_duration_var = tk.StringVar(value="3")
+        self.rest_duration_var = tk.StringVar(value="1")
+
+        self._field(
+            fields,
+            0,
+            0,
+            "측정 날짜",
+            self.test_date_var,
+        )
+        self._field(
+            fields,
+            0,
+            1,
+            "신장(cm)",
+            self.height_var,
+        )
+        self._field(
+            fields,
+            0,
+            2,
+            "체중(kg)",
+            self.weight_var,
+        )
+        self._field(
+            fields,
+            0,
+            3,
+            "BMI(kg/m²)",
+            self.bmi_var,
+        )
+
+        self._field(
+            fields,
+            2,
+            0,
+            "최대 산소 섭취량(ml/kg/min)",
+            self.vo2max_var,
+        )
+        self._field(
+            fields,
+            2,
+            1,
+            "최대 심박수(beats/min)",
+            self.hrmax_var,
+        )
+        self._field(
+            fields,
+            2,
+            2,
+            "운동 시간",
+            self.exercise_time_var,
+        )
+
+        ttk.Label(
+            fields,
+            text="부하 단위",
+        ).grid(
+            row=2,
+            column=3,
+            sticky="w",
+            padx=5,
+            pady=(6, 2),
+        )
+        load_combo = ttk.Combobox(
+            fields,
+            textvariable=self.load_type_var,
+            values=["Speed", "Power"],
+            state="readonly",
+        )
+        load_combo.grid(
+            row=3,
+            column=3,
+            sticky="ew",
+            padx=5,
+            pady=(0, 7),
+        )
+        load_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.update_load_label(),
+        )
+
+        self.max_load_label = ttk.Label(
+            fields,
+            text="최대 Speed(km/h)",
+        )
+        self.max_load_label.grid(
+            row=4,
+            column=0,
+            sticky="w",
+            padx=5,
+            pady=(6, 2),
+        )
+        ttk.Entry(
+            fields,
+            textvariable=self.max_load_var,
+        ).grid(
+            row=5,
+            column=0,
+            sticky="ew",
+            padx=5,
+            pady=(0, 7),
+        )
+
+        self._field(
+            fields,
+            4,
+            1,
+            "경사도(%)",
+            self.grade_var,
+        )
+        self._field(
+            fields,
+            4,
+            2,
+            "일반 운동 Stage 시간(분)",
+            self.stage_duration_var,
+        )
+        self._field(
+            fields,
+            4,
+            3,
+            "Rest 시간(분)",
+            self.rest_duration_var,
+        )
+
+        actions = ttk.Frame(self.measurement_tab)
+        actions.pack(fill="x", pady=10)
+
+        ttk.Button(
+            actions,
+            text="측정 정보 저장",
+            command=self.save_current_measurement,
+        ).pack(side="left", padx=(0, 7))
+
+        ttk.Button(
+            actions,
+            text="Excel 입력 양식 저장",
+            command=self.save_input_template,
+        ).pack(side="left")
+
+        excel_box = ttk.LabelFrame(
+            self.measurement_tab,
+            text="Excel 원자료",
+            padding=10,
+        )
+        excel_box.pack(
+            fill="both",
+            expand=True,
+        )
+        excel_box.columnconfigure(0, weight=1)
+        excel_box.rowconfigure(2, weight=1)
+
+        self.excel_path_var = tk.StringVar()
+        ttk.Entry(
+            excel_box,
+            textvariable=self.excel_path_var,
+            state="readonly",
+        ).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 6),
+        )
+        ttk.Button(
+            excel_box,
+            text="Excel 파일 선택",
+            command=self.choose_excel_file,
+        ).grid(
+            row=0,
+            column=1,
+            padx=3,
+        )
+        ttk.Button(
+            excel_box,
+            text="Excel 읽기",
+            command=self.parse_selected_excel,
+        ).grid(
+            row=0,
+            column=2,
+            padx=3,
+        )
+
+        ttk.Label(
+            excel_box,
+            text=(
+                "숫자 Stage와 Rest는 위에서 설정한 시간으로 "
+                "그래프에 맞춰 정규화됩니다."
+            ),
+            style="Muted.TLabel",
+        ).grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            pady=(8, 5),
+        )
+
+        columns = (
+            "Stage",
+            "Duration",
+            "HR_min",
+            "HR_max",
+            "HR_mean",
+            "VO2_min",
+            "VO2_max",
+            "VO2_mean",
+        )
+        self.summary_tree = ttk.Treeview(
+            excel_box,
+            columns=columns,
+            show="headings",
+        )
+        for column in columns:
+            self.summary_tree.heading(
+                column,
+                text=column,
+            )
+            self.summary_tree.column(
+                column,
+                width=90,
+                anchor="center",
+                stretch=True,
+            )
+        self.summary_tree.grid(
+            row=2,
+            column=0,
+            columnspan=3,
+            sticky="nsew",
+            pady=(8, 0),
+        )
+
+    def _field(
+        self,
+        parent,
+        row: int,
+        col: int,
+        label: str,
+        variable: tk.StringVar,
+    ) -> None:
+        ttk.Label(
+            parent,
+            text=label,
+        ).grid(
+            row=row,
+            column=col,
+            sticky="w",
+            padx=5,
+            pady=(6, 2),
+        )
+        ttk.Entry(
+            parent,
+            textvariable=variable,
+        ).grid(
+            row=row + 1,
+            column=col,
+            sticky="ew",
+            padx=5,
+            pady=(0, 7),
+        )
+
+    # ---------- Analysis ----------
+
+    def _build_analysis_tab(self) -> None:
+        option_row = ttk.Frame(self.analysis_tab)
+        option_row.pack(fill="x", pady=(0, 8))
+
+        self.show_lt1_var = tk.BooleanVar(value=True)
+        self.show_lt2_var = tk.BooleanVar(value=True)
+
+        ttk.Checkbutton(
+            option_row,
+            text="LT1 계산 및 표시",
+            variable=self.show_lt1_var,
+        ).pack(side="left", padx=(0, 20))
+        ttk.Checkbutton(
+            option_row,
+            text="LT2 계산 및 표시",
+            variable=self.show_lt2_var,
+        ).pack(side="left")
+
+        lactate_box = ttk.LabelFrame(
+            self.analysis_tab,
+            text="혈중 젖산염 입력",
+            padding=10,
+        )
+        lactate_box.pack(fill="x")
+
+        self.lactate_frame = ttk.Frame(lactate_box)
+        self.lactate_frame.pack(fill="x")
+
+        ttk.Button(
+            lactate_box,
+            text="분석 실행",
+            style="Primary.TButton",
+            command=self.run_analysis,
+        ).pack(
+            anchor="e",
+            pady=(8, 0),
+        )
+
+        result_row = ttk.Frame(self.analysis_tab)
+        result_row.pack(fill="x", pady=8)
+
+        self.lt1_result_var = tk.StringVar(
+            value="LT1: 분석 전"
+        )
+        self.lt2_result_var = tk.StringVar(
+            value="LT2: 분석 전"
+        )
+
+        ttk.Label(
+            result_row,
+            textvariable=self.lt1_result_var,
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(0, 5),
+        )
+        ttk.Label(
+            result_row,
+            textvariable=self.lt2_result_var,
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(5, 0),
+        )
+
+        graph_notebook = ttk.Notebook(
+            self.analysis_tab
+        )
+        graph_notebook.pack(
+            fill="both",
+            expand=True,
+        )
+
+        frame1 = ttk.Frame(graph_notebook)
+        frame2 = ttk.Frame(graph_notebook)
+        frame3 = ttk.Frame(graph_notebook)
+
+        graph_notebook.add(
+            frame1,
+            text="혈중 젖산염",
+        )
+        graph_notebook.add(
+            frame2,
+            text="HR 및 VO2",
+        )
+        graph_notebook.add(
+            frame3,
+            text="HR, VO2 및 Lactate",
+        )
+
+        self.lactate_graph = GraphCanvas(
+            frame1,
+            height=430,
+        )
+        self.lactate_graph.pack(
+            fill="both",
+            expand=True,
+        )
+        self.basic_graph = GraphCanvas(
+            frame2,
+            height=430,
+        )
+        self.basic_graph.pack(
+            fill="both",
+            expand=True,
+        )
+        self.combined_graph = GraphCanvas(
+            frame3,
+            height=430,
+        )
+        self.combined_graph.pack(
+            fill="both",
+            expand=True,
+        )
+
+    # ---------- Report ----------
+
+    def _build_report_tab(self) -> None:
+        toolbar = ttk.Frame(
+            self.report_tab,
+            padding=(10, 8),
+        )
+        toolbar.pack(fill="x")
 
         for text, command in [
             ("굵게", "bold"),
             ("기울임", "italic"),
             ("밑줄", "underline"),
         ]:
-            button = QPushButton(text)
-            button.clicked.connect(
-                lambda _checked=False, cmd=command: self.exec_report_command(
+            ttk.Button(
+                toolbar,
+                text=text,
+                command=lambda cmd=command: self.apply_text_style(
                     cmd
-                )
-            )
-            toolbar.addWidget(button)
+                ),
+            ).pack(side="left", padx=2)
 
-        toolbar.addSeparator()
-
-        for text, color in [
-            ("빨강", "#D7191C"),
-            ("파랑", "#2679D9"),
-            ("검정", "#111111"),
-        ]:
-            button = QPushButton(text)
-            button.clicked.connect(
-                lambda _checked=False, value=color: self.set_report_color(
-                    value
-                )
-            )
-            toolbar.addWidget(button)
-
-        clear_button = QPushButton("서식 지우기")
-        clear_button.clicked.connect(
-            lambda: self.exec_report_command("removeFormat")
-        )
-        toolbar.addWidget(clear_button)
-        toolbar.addSeparator()
-        toolbar.addWidget(apply_button)
-        toolbar.addSeparator()
-        toolbar.addWidget(pdf_button)
-        toolbar.addWidget(excel_button)
-
-        layout.addWidget(toolbar)
-
-        self.report_status = QLabel(
-            "분석을 실행하면 결과지가 표시됩니다."
-        )
-        self.report_status.setStyleSheet("color:#667085;")
-        layout.addWidget(self.report_status)
-
-        self.report_view = QWebEngineView()
-
-        profile = QWebEngineProfile.defaultProfile()
-        self.interceptor = LocalOnlyInterceptor(self)
-        profile.setUrlRequestInterceptor(self.interceptor)
-
-        self.report_view.setContextMenuPolicy(Qt.NoContextMenu)
-        layout.addWidget(self.report_view, 1)
-        return page
-
-    # ---------- Helpers ----------
-
-    def _double_spin(
-        self,
-        step: float,
-        decimals: int,
-        *,
-        maximum: float = 1000,
-    ) -> QDoubleSpinBox:
-        widget = QDoubleSpinBox()
-        widget.setRange(0, maximum)
-        widget.setDecimals(decimals)
-        widget.setSingleStep(step)
-        return widget
-
-    def _graph_panel(self, title: str) -> dict[str, Any]:
-        container = QGroupBox(title)
-        layout = QVBoxLayout(container)
-        label = QLabel("분석 결과 없음")
-        label.setAlignment(Qt.AlignCenter)
-        label.setMinimumHeight(220)
-        label.setStyleSheet("background:#FAFAFA; color:#667085;")
-        layout.addWidget(label)
-        return {"container": container, "label": label}
-
-    def _current_athlete(self) -> dict[str, Any] | None:
-        athlete_id = self.measurement_athlete.currentData()
-        if athlete_id is None:
-            return None
-        for athlete in self.athletes:
-            if int(athlete["id"]) == int(athlete_id):
-                return athlete
-        return None
-
-    def _current_meta(self) -> dict[str, Any]:
-        athlete = self._current_athlete()
-        if athlete is None:
-            raise ValueError("선수를 먼저 선택하세요.")
-
-        load_type = self.load_type.currentText()
-        qdate = self.test_date.date()
-        return {
-            "athlete": athlete,
-            "test_date": dt.date(
-                qdate.year(),
-                qdate.month(),
-                qdate.day(),
+        ttk.Button(
+            toolbar,
+            text="빨강",
+            command=lambda: self.apply_text_color(
+                "#D7191C"
             ),
-            "height": self.height.value(),
-            "weight": self.weight.value(),
-            "bmi": self.bmi.value(),
-            "vo2max": self.vo2max.value(),
-            "hrmax": self.hrmax.value(),
-            "exercise_time": self.exercise_time.text().strip(),
-            "load_type": load_type,
-            "load_unit": "km/h" if load_type == "Speed" else "watt",
-            "max_load": self.max_load.value(),
-            "grade_percent": self.grade_percent.value(),
-            "stage_duration_min": self.stage_duration.value(),
-            "rest_duration_min": self.rest_duration.value(),
-            "show_lt1": self.show_lt1.isChecked(),
-            "show_lt2": self.show_lt2.isChecked(),
-        }
+        ).pack(side="left", padx=(10, 2))
+        ttk.Button(
+            toolbar,
+            text="파랑",
+            command=lambda: self.apply_text_color(
+                "#2679D9"
+            ),
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            toolbar,
+            text="검정",
+            command=lambda: self.apply_text_color(
+                "#111111"
+            ),
+        ).pack(side="left", padx=2)
 
-    def _error(self, title: str, message: str) -> None:
-        QMessageBox.critical(self, title, message)
+        ttk.Button(
+            toolbar,
+            text="서식 지우기",
+            command=self.clear_text_style,
+        ).pack(side="left", padx=(10, 2))
 
-    def _success(self, message: str) -> None:
-        self.statusBar().showMessage(message, 5000)
+        ttk.Button(
+            toolbar,
+            text="PDF 결과지 저장",
+            command=self.save_report_pdf,
+        ).pack(side="right", padx=2)
+        ttk.Button(
+            toolbar,
+            text="Excel 결과 저장",
+            command=self.save_report_excel,
+        ).pack(side="right", padx=2)
 
-    # ---------- Athlete actions ----------
+        self.report_scroll = ScrollableFrame(
+            self.report_tab
+        )
+        self.report_scroll.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.report_container = self.report_scroll.inner
+        self._render_empty_report()
+
+    def _render_empty_report(self) -> None:
+        for child in self.report_container.winfo_children():
+            child.destroy()
+
+        ttk.Label(
+            self.report_container,
+            text="분석을 실행하면 결과지가 표시됩니다.",
+            style="Muted.TLabel",
+        ).pack(pady=40)
+
+    def render_report(self) -> None:
+        if (
+            self.report_data is None
+            or self.analysis is None
+        ):
+            self._render_empty_report()
+            return
+
+        for child in self.report_container.winfo_children():
+            child.destroy()
+
+        self.report_texts = {}
+        self._current_report_text = None
+
+        page1 = tk.Frame(
+            self.report_container,
+            bg="white",
+            bd=1,
+            relief="solid",
+            padx=28,
+            pady=22,
+        )
+        page1.pack(
+            fill="x",
+            padx=70,
+            pady=(20, 15),
+        )
+
+        tk.Label(
+            page1,
+            text="차세대스포츠과학지원센터 체력측정 결과",
+            bg="white",
+            fg="#123A79",
+            font=("Malgun Gothic", 18, "bold"),
+        ).pack(pady=(0, 14))
+
+        self._report_section_label(
+            page1,
+            "선수 정보",
+        )
+        info = ttk.Frame(page1)
+        info.pack(fill="x", pady=(4, 10))
+        self._report_value(
+            info,
+            0,
+            "이름",
+            self.report_data["name"],
+        )
+        self._report_value(
+            info,
+            1,
+            "성별",
+            self.report_data["sex"],
+        )
+        self._report_value(
+            info,
+            2,
+            "구분",
+            self.report_data["category"],
+        )
+
+        self._report_section_label(
+            page1,
+            "선수 체격 및 신체조성",
+        )
+        body = ttk.Frame(page1)
+        body.pack(fill="x", pady=(4, 10))
+        self._report_value(
+            body,
+            0,
+            "신장(cm)",
+            self.report_data["height"],
+        )
+        self._report_value(
+            body,
+            1,
+            "체중(kg)",
+            self.report_data["weight"],
+        )
+        self._report_value(
+            body,
+            2,
+            "BMI(kg/m²)",
+            self.report_data["bmi"],
+        )
+
+        self._report_section_label(
+            page1,
+            "운동 부하 검사 - KISS Protocol",
+        )
+        load = ttk.Frame(page1)
+        load.pack(fill="x", pady=(4, 10))
+        self._report_value(
+            load,
+            0,
+            "최대 산소 섭취량",
+            self.report_data["vo2max"],
+        )
+        self._report_value(
+            load,
+            1,
+            "최대 심박수",
+            self.report_data["hrmax"],
+        )
+        self._report_value(
+            load,
+            2,
+            "최대 부하",
+            (
+                f"{self.report_data['max_load']} "
+                f"{self.report_data['load_unit']}"
+            ),
+        )
+
+        self._report_section_label(
+            page1,
+            "심박수(beats/min)",
+        )
+
+        stage_tree = ttk.Treeview(
+            page1,
+            columns=(
+                "stage",
+                "range",
+                "mean",
+                "zone",
+            ),
+            show="headings",
+            height=min(
+                max(len(self.report_data["stages"]), 3),
+                10,
+            ),
+        )
+        for key, label in [
+            ("stage", "Stage"),
+            ("range", "HR range"),
+            ("mean", "HR mean"),
+            ("zone", "주요 Zone"),
+        ]:
+            stage_tree.heading(
+                key,
+                text=label,
+            )
+            stage_tree.column(
+                key,
+                anchor="center",
+                width=100,
+                stretch=True,
+            )
+        for stage in self.report_data["stages"]:
+            stage_tree.insert(
+                "",
+                "end",
+                values=(
+                    stage["stage"],
+                    stage["hr_range"],
+                    stage["hr_mean"],
+                    stage["zone"],
+                ),
+            )
+        stage_tree.pack(
+            fill="x",
+            pady=(4, 8),
+        )
+
+        graph = GraphCanvas(
+            page1,
+            height=360,
+        )
+        graph.pack(
+            fill="x",
+            pady=8,
+        )
+        graph.set_model(
+            self.analysis.get("basic_model")
+        )
+
+        self._report_text(
+            page1,
+            "page1_comment",
+            self.report_data.get(
+                "page1_comment",
+                "",
+            ),
+            height=4,
+        )
+
+        page2 = tk.Frame(
+            self.report_container,
+            bg="white",
+            bd=1,
+            relief="solid",
+            padx=28,
+            pady=22,
+        )
+        page2.pack(
+            fill="x",
+            padx=70,
+            pady=(0, 30),
+        )
+
+        self._report_section_label(
+            page2,
+            "혈중 젖산염(mmol/L)",
+        )
+
+        lactate_tree = ttk.Treeview(
+            page2,
+            columns=("stage", "value"),
+            show="headings",
+            height=min(
+                max(len(self.report_data["lactates"]), 3),
+                8,
+            ),
+        )
+        lactate_tree.heading(
+            "stage",
+            text="Stage",
+        )
+        lactate_tree.heading(
+            "value",
+            text="Lactate",
+        )
+        lactate_tree.column(
+            "stage",
+            anchor="center",
+            stretch=True,
+        )
+        lactate_tree.column(
+            "value",
+            anchor="center",
+            stretch=True,
+        )
+        for point in self.report_data["lactates"]:
+            lactate_tree.insert(
+                "",
+                "end",
+                values=(
+                    point["label"],
+                    f"{float(point['lactate']):.2f}",
+                ),
+            )
+        lactate_tree.pack(
+            fill="x",
+            pady=(4, 8),
+        )
+
+        lac_graph = GraphCanvas(
+            page2,
+            height=300,
+        )
+        lac_graph.pack(
+            fill="x",
+            pady=8,
+        )
+        lac_graph.set_model(
+            self.analysis.get("lactate_model")
+        )
+
+        self._report_text(
+            page2,
+            "lactate_comment",
+            self.report_data.get(
+                "lactate_comment",
+                "",
+            ),
+            height=4,
+        )
+
+        self._report_section_label(
+            page2,
+            "총평",
+        )
+        combined = GraphCanvas(
+            page2,
+            height=360,
+        )
+        combined.pack(
+            fill="x",
+            pady=8,
+        )
+        combined.set_model(
+            self.analysis.get(
+                "combined_report_model"
+            )
+        )
+
+        if self.report_data.get("lt1", {}).get("show"):
+            self._report_section_label(
+                page2,
+                "LT1 분석 결과",
+            )
+            self._report_text(
+                page2,
+                "lt1_comment",
+                self.report_data.get(
+                    "lt1_comment",
+                    "",
+                ),
+                height=5,
+            )
+
+        if self.report_data.get("lt2", {}).get("show"):
+            self._report_section_label(
+                page2,
+                "LT2 분석 결과",
+            )
+            self._report_text(
+                page2,
+                "lt2_comment",
+                self.report_data.get(
+                    "lt2_comment",
+                    "",
+                ),
+                height=5,
+            )
+
+    def _report_section_label(
+        self,
+        parent,
+        text: str,
+    ) -> None:
+        label = tk.Label(
+            parent,
+            text=text,
+            bg="#EAF6FF",
+            fg="#111111",
+            font=("Malgun Gothic", 11, "bold"),
+            padx=8,
+            pady=4,
+        )
+        label.pack(
+            anchor="w",
+            pady=(8, 3),
+        )
+
+    def _report_value(
+        self,
+        parent,
+        column: int,
+        label: str,
+        value: Any,
+    ) -> None:
+        parent.columnconfigure(
+            column,
+            weight=1,
+        )
+        box = ttk.Frame(parent)
+        box.grid(
+            row=0,
+            column=column,
+            sticky="ew",
+            padx=4,
+        )
+        ttk.Label(
+            box,
+            text=label,
+            style="Muted.TLabel",
+        ).pack()
+        ttk.Label(
+            box,
+            text=str(value),
+            font=("Malgun Gothic", 9),
+        ).pack()
+
+    def _report_text(
+        self,
+        parent,
+        key: str,
+        value: str,
+        *,
+        height: int,
+    ) -> None:
+        text = tk.Text(
+            parent,
+            height=height,
+            wrap="word",
+            font=("Malgun Gothic", 9),
+            relief="solid",
+            bd=1,
+            padx=6,
+            pady=5,
+        )
+        text.insert("1.0", value)
+        text.pack(
+            fill="x",
+            pady=(4, 8),
+        )
+        text.tag_configure(
+            "bold",
+            font=("Malgun Gothic", 9, "bold"),
+        )
+        text.tag_configure(
+            "italic",
+            font=("Malgun Gothic", 9, "italic"),
+        )
+        text.tag_configure(
+            "underline",
+            underline=True,
+        )
+        text.tag_configure(
+            "red",
+            foreground="#D7191C",
+        )
+        text.tag_configure(
+            "blue",
+            foreground="#2679D9",
+        )
+        text.tag_configure(
+            "black",
+            foreground="#111111",
+        )
+        text.bind(
+            "<FocusIn>",
+            lambda _event, widget=text: self._set_current_report_text(
+                widget
+            ),
+        )
+        self.report_texts[key] = text
+
+    def _set_current_report_text(
+        self,
+        widget: tk.Text,
+    ) -> None:
+        self._current_report_text = widget
+
+    # ---------- Data actions ----------
 
     def refresh_athletes(self) -> None:
         try:
-            current_id = self.measurement_athlete.currentData()
             self.athletes = list_athletes()
+            for item in self.athlete_tree.get_children():
+                self.athlete_tree.delete(item)
 
-            self.athlete_table.setRowCount(len(self.athletes))
-            for row, athlete in enumerate(self.athletes):
-                for col, key in enumerate(["name", "sex", "category"]):
-                    self.athlete_table.setItem(
-                        row,
-                        col,
-                        QTableWidgetItem(str(athlete[key])),
-                    )
-
-            self.measurement_athlete.blockSignals(True)
-            self.measurement_athlete.clear()
             for athlete in self.athletes:
-                self.measurement_athlete.addItem(
-                    (
-                        f"{athlete['name']} "
-                        f"({athlete['sex']} / {athlete['category']})"
+                self.athlete_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        athlete["name"],
+                        athlete["sex"],
+                        athlete["category"],
                     ),
-                    int(athlete["id"]),
                 )
 
-            if current_id is not None:
-                idx = self.measurement_athlete.findData(current_id)
-                if idx >= 0:
-                    self.measurement_athlete.setCurrentIndex(idx)
-            self.measurement_athlete.blockSignals(False)
-            self.on_measurement_athlete_changed()
+            values = [
+                (
+                    f"{athlete['name']} "
+                    f"({athlete['sex']} / {athlete['category']})"
+                )
+                for athlete in self.athletes
+            ]
+            self.measurement_athlete_combo[
+                "values"
+            ] = values
+
+            if values:
+                self.measurement_athlete_combo.current(
+                    min(
+                        self.measurement_athlete_combo.current(),
+                        len(values) - 1,
+                    )
+                    if self.measurement_athlete_combo.current() >= 0
+                    else 0
+                )
+                self.on_measurement_athlete_changed()
+            else:
+                self.measurement_athlete_var.set("")
+                self.saved_measurement_combo["values"] = [
+                    "새 측정"
+                ]
+                self.saved_measurement_combo.current(0)
+
+            self._status("선수 목록을 불러왔습니다.")
         except Exception as exc:
             self._error(
                 "선수 목록 오류",
-                f"선수 목록을 불러오지 못했습니다.\n{exc}",
+                str(exc),
             )
 
     def register_athlete(self) -> None:
         try:
             athlete = add_athlete(
-                self.athlete_name.text(),
-                self.athlete_sex.currentText(),
-                self.athlete_category.currentText(),
+                self.athlete_name_var.get(),
+                self.athlete_sex_var.get(),
+                self.athlete_category_var.get(),
             )
-            self.athlete_name.clear()
+            self.athlete_name_var.set("")
             self.refresh_athletes()
-            idx = self.measurement_athlete.findData(
+
+            for index, item in enumerate(
+                self.athletes
+            ):
+                if int(item["id"]) == int(
+                    athlete["id"]
+                ):
+                    self.measurement_athlete_combo.current(
+                        index
+                    )
+                    break
+
+            self._status(
+                f"{athlete['name']} 선수를 저장했습니다."
+            )
+        except Exception as exc:
+            self._error(
+                "선수 저장 오류",
+                str(exc),
+            )
+
+    def _selected_athlete(
+        self,
+    ) -> dict[str, Any] | None:
+        index = self.measurement_athlete_combo.current()
+        if index < 0 or index >= len(self.athletes):
+            return None
+        return self.athletes[index]
+
+    def on_measurement_athlete_changed(
+        self,
+    ) -> None:
+        athlete = self._selected_athlete()
+        self.measurements = []
+
+        if athlete is None:
+            return
+
+        try:
+            self.measurements = list_measurements(
                 int(athlete["id"])
             )
-            if idx >= 0:
-                self.measurement_athlete.setCurrentIndex(idx)
-            self._success(f"{athlete['name']} 선수를 저장했습니다.")
-        except Exception as exc:
-            self._error("선수 저장 오류", str(exc))
-
-    # ---------- Measurement actions ----------
-
-    def on_measurement_athlete_changed(self, *_args: Any) -> None:
-        athlete = self._current_athlete()
-        self.measurements = []
-        self.saved_measurement.blockSignals(True)
-        self.saved_measurement.clear()
-        self.saved_measurement.addItem("새 측정", None)
-
-        if athlete is not None:
-            try:
-                self.measurements = list_measurements(
-                    int(athlete["id"])
-                )
-                for item in self.measurements:
-                    self.saved_measurement.addItem(
-                        str(item["test_date"]),
-                        int(item["id"]),
-                    )
-            except Exception as exc:
-                self._error("측정 기록 오류", str(exc))
-
-        self.saved_measurement.blockSignals(False)
-        self.fill_measurement(None)
-
-    def on_saved_measurement_changed(self, *_args: Any) -> None:
-        measurement_id = self.saved_measurement.currentData()
-        selected = next(
-            (
-                item
+            values = ["새 측정"] + [
+                str(item["test_date"])
                 for item in self.measurements
-                if item["id"] == measurement_id
-            ),
-            None,
-        )
-        self.fill_measurement(selected)
+            ]
+            self.saved_measurement_combo[
+                "values"
+            ] = values
+            self.saved_measurement_combo.current(0)
+            self.fill_measurement(None)
+        except Exception as exc:
+            self._error(
+                "측정 기록 오류",
+                str(exc),
+            )
+
+    def on_saved_measurement_changed(
+        self,
+    ) -> None:
+        index = self.saved_measurement_combo.current()
+        if index <= 0:
+            self.fill_measurement(None)
+            return
+        measurement_index = index - 1
+        if measurement_index < len(
+            self.measurements
+        ):
+            self.fill_measurement(
+                self.measurements[
+                    measurement_index
+                ]
+            )
 
     def fill_measurement(
         self,
         measurement: dict[str, Any] | None,
     ) -> None:
         if measurement is None:
-            self.test_date.setDate(QDate.currentDate())
-            self.height.setValue(0)
-            self.weight.setValue(0)
-            self.bmi.setValue(0)
-            self.vo2max.setValue(0)
-            self.hrmax.setValue(0)
-            self.exercise_time.clear()
-            self.load_type.setCurrentText("Speed")
-            self.max_load.setValue(0)
-            self.grade_percent.setValue(0)
-            self.stage_duration.setValue(3)
-            self.rest_duration.setValue(1)
+            self.test_date_var.set(
+                dt.date.today().isoformat()
+            )
+            self.height_var.set("0")
+            self.weight_var.set("0")
+            self.bmi_var.set("0")
+            self.vo2max_var.set("0")
+            self.hrmax_var.set("0")
+            self.exercise_time_var.set("")
+            self.load_type_var.set("Speed")
+            self.max_load_var.set("0")
+            self.grade_var.set("0")
+            self.stage_duration_var.set("3")
+            self.rest_duration_var.set("1")
+            self.update_load_label()
             return
 
-        date_value = dt.date.fromisoformat(
+        self.test_date_var.set(
             str(measurement["test_date"])
         )
-        self.test_date.setDate(
-            QDate(
-                date_value.year,
-                date_value.month,
-                date_value.day,
+        self.height_var.set(
+            str(measurement.get("height") or 0)
+        )
+        self.weight_var.set(
+            str(measurement.get("weight") or 0)
+        )
+        self.bmi_var.set(
+            str(measurement.get("bmi") or 0)
+        )
+        self.vo2max_var.set(
+            str(measurement.get("vo2max") or 0)
+        )
+        self.hrmax_var.set(
+            str(measurement.get("hrmax") or 0)
+        )
+        self.exercise_time_var.set(
+            str(
+                measurement.get(
+                    "exercise_time"
+                )
+                or ""
             )
         )
-        self.height.setValue(float(measurement.get("height") or 0))
-        self.weight.setValue(float(measurement.get("weight") or 0))
-        self.bmi.setValue(float(measurement.get("bmi") or 0))
-        self.vo2max.setValue(float(measurement.get("vo2max") or 0))
-        self.hrmax.setValue(int(measurement.get("hrmax") or 0))
-        self.exercise_time.setText(
-            str(measurement.get("exercise_time") or "")
+        self.load_type_var.set(
+            str(
+                measurement.get(
+                    "load_type"
+                )
+                or "Speed"
+            )
         )
-        self.load_type.setCurrentText(
-            str(measurement.get("load_type") or "Speed")
+        self.max_load_var.set(
+            str(
+                measurement.get(
+                    "max_load"
+                )
+                or 0
+            )
         )
-        self.max_load.setValue(float(measurement.get("max_load") or 0))
-        self.grade_percent.setValue(
-            float(measurement.get("grade_percent") or 0)
+        self.grade_var.set(
+            str(
+                measurement.get(
+                    "grade_percent"
+                )
+                or 0
+            )
         )
-        self.stage_duration.setValue(
-            max(
-                1,
-                int(
+        self.stage_duration_var.set(
+            str(
+                max(
+                    1,
                     round(
                         float(
                             measurement.get(
@@ -684,14 +1548,14 @@ class MainWindow(QMainWindow):
                             )
                             or 3
                         )
-                    )
-                ),
+                    ),
+                )
             )
         )
-        self.rest_duration.setValue(
-            max(
-                1,
-                int(
+        self.rest_duration_var.set(
+            str(
+                max(
+                    1,
                     round(
                         float(
                             measurement.get(
@@ -699,96 +1563,229 @@ class MainWindow(QMainWindow):
                             )
                             or 1
                         )
-                    )
-                ),
+                    ),
+                )
             )
         )
+        self.update_load_label()
 
-    def update_load_label(self, load_type: str) -> None:
-        if load_type == "Power":
-            self.max_load_label.setText("최대 Power(watt)")
+    def update_load_label(self) -> None:
+        if self.load_type_var.get() == "Power":
+            self.max_load_label.configure(
+                text="최대 Power(watt)"
+            )
         else:
-            self.max_load_label.setText("최대 Speed(km/h)")
+            self.max_load_label.configure(
+                text="최대 Speed(km/h)"
+            )
 
-    def save_current_measurement(self) -> None:
+    def _current_meta(
+        self,
+    ) -> dict[str, Any]:
+        athlete = self._selected_athlete()
+        if athlete is None:
+            raise ValueError(
+                "선수를 먼저 선택하세요."
+            )
+
+        try:
+            test_date = dt.date.fromisoformat(
+                self.test_date_var.get().strip()
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "측정 날짜는 YYYY-MM-DD 형식으로 입력하세요."
+            ) from exc
+
+        load_type = self.load_type_var.get()
+        return {
+            "athlete": athlete,
+            "test_date": test_date,
+            "height": self._float(
+                self.height_var.get(),
+                "신장",
+            ),
+            "weight": self._float(
+                self.weight_var.get(),
+                "체중",
+            ),
+            "bmi": self._float(
+                self.bmi_var.get(),
+                "BMI",
+            ),
+            "vo2max": self._float(
+                self.vo2max_var.get(),
+                "최대 산소 섭취량",
+            ),
+            "hrmax": self._int(
+                self.hrmax_var.get(),
+                "최대 심박수",
+            ),
+            "exercise_time": (
+                self.exercise_time_var.get().strip()
+            ),
+            "load_type": load_type,
+            "load_unit": (
+                "km/h"
+                if load_type == "Speed"
+                else "watt"
+            ),
+            "max_load": self._float(
+                self.max_load_var.get(),
+                "최대 부하",
+            ),
+            "grade_percent": self._float(
+                self.grade_var.get(),
+                "경사도",
+            ),
+            "stage_duration_min": max(
+                1,
+                self._int(
+                    self.stage_duration_var.get(),
+                    "일반 운동 Stage 시간",
+                ),
+            ),
+            "rest_duration_min": max(
+                1,
+                self._int(
+                    self.rest_duration_var.get(),
+                    "Rest 시간",
+                ),
+            ),
+            "show_lt1": self.show_lt1_var.get(),
+            "show_lt2": self.show_lt2_var.get(),
+        }
+
+    def save_current_measurement(
+        self,
+    ) -> None:
         try:
             meta = self._current_meta()
-            athlete = meta["athlete"]
             saved = save_measurement(
-                athlete_id=int(athlete["id"]),
-                test_date=meta["test_date"].isoformat(),
+                athlete_id=int(
+                    meta["athlete"]["id"]
+                ),
+                test_date=meta[
+                    "test_date"
+                ].isoformat(),
                 height=meta["height"],
                 weight=meta["weight"],
                 bmi=meta["bmi"],
                 vo2max=meta["vo2max"],
                 hrmax=meta["hrmax"],
-                exercise_time=meta["exercise_time"],
+                exercise_time=meta[
+                    "exercise_time"
+                ],
                 load_type=meta["load_type"],
                 max_load=meta["max_load"],
-                grade_percent=meta["grade_percent"],
-                stage_duration_min=meta["stage_duration_min"],
-                rest_duration_min=meta["rest_duration_min"],
+                grade_percent=meta[
+                    "grade_percent"
+                ],
+                stage_duration_min=meta[
+                    "stage_duration_min"
+                ],
+                rest_duration_min=meta[
+                    "rest_duration_min"
+                ],
             )
             self.on_measurement_athlete_changed()
-            idx = self.saved_measurement.findData(
-                int(saved["id"])
+
+            for index, item in enumerate(
+                self.measurements,
+                start=1,
+            ):
+                if int(item["id"]) == int(
+                    saved["id"]
+                ):
+                    self.saved_measurement_combo.current(
+                        index
+                    )
+                    break
+
+            self._status(
+                "측정 정보를 저장했습니다."
             )
-            if idx >= 0:
-                self.saved_measurement.setCurrentIndex(idx)
-            self._success("측정 정보를 저장했습니다.")
         except Exception as exc:
-            self._error("측정 정보 저장 오류", str(exc))
+            self._error(
+                "측정 정보 저장 오류",
+                str(exc),
+            )
 
     def save_input_template(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Excel 입력 양식 저장",
-            str(ROOT / "NGC_CPET_입력양식.xlsx"),
-            "Excel Workbook (*.xlsx)",
+        path = filedialog.asksaveasfilename(
+            title="Excel 입력 양식 저장",
+            initialfile="NGC_CPET_입력양식.xlsx",
+            defaultextension=".xlsx",
+            filetypes=[
+                ("Excel Workbook", "*.xlsx")
+            ],
         )
         if not path:
             return
         try:
-            Path(path).write_bytes(build_input_template())
-            self._success("Excel 입력 양식을 저장했습니다.")
+            Path(path).write_bytes(
+                build_input_template()
+            )
+            self._status(
+                "Excel 입력 양식을 저장했습니다."
+            )
         except Exception as exc:
-            self._error("양식 저장 오류", str(exc))
+            self._error(
+                "양식 저장 오류",
+                str(exc),
+            )
 
     def choose_excel_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Excel 파일 선택",
-            str(ROOT),
-            "Excel Workbook (*.xlsx *.xlsm)",
+        path = filedialog.askopenfilename(
+            title="Excel 파일 선택",
+            filetypes=[
+                (
+                    "Excel Workbook",
+                    "*.xlsx *.xlsm",
+                )
+            ],
         )
         if path:
-            self.excel_path.setText(path)
+            self.excel_path_var.set(path)
 
     def parse_selected_excel(self) -> None:
-        path = self.excel_path.text().strip()
+        path = self.excel_path_var.get().strip()
         if not path:
-            self._error("Excel 입력", "Excel 파일을 먼저 선택하세요.")
+            self._error(
+                "Excel 입력",
+                "Excel 파일을 먼저 선택하세요.",
+            )
             return
 
         try:
             meta = self._current_meta()
             with open(path, "rb") as handle:
-                df, segments, summary = excel_parser.parse_excel(
-                    handle,
-                    stage_duration_min=meta["stage_duration_min"],
-                    rest_duration_min=meta["rest_duration_min"],
-                    allout_load=(
-                        meta["max_load"]
-                        if meta["max_load"] > 0
-                        else None
-                    ),
+                rows, segments, summary = (
+                    excel_parser.parse_excel(
+                        handle,
+                        stage_duration_min=meta[
+                            "stage_duration_min"
+                        ],
+                        rest_duration_min=meta[
+                            "rest_duration_min"
+                        ],
+                        allout_load=(
+                            meta["max_load"]
+                            if meta["max_load"] > 0
+                            else None
+                        ),
+                    )
                 )
 
             with open(path, "rb") as handle:
-                imported_lactate = parse_lactate_sheet(handle)
+                imported_lactate = (
+                    parse_lactate_sheet(
+                        handle
+                    )
+                )
 
             self.parsed = {
-                "df": df,
+                "rows": rows,
                 "segments": segments,
                 "summary": summary,
                 "lactate_rows": imported_lactate,
@@ -796,82 +1793,168 @@ class MainWindow(QMainWindow):
             self.meta = meta
             self.analysis = None
             self.report_data = None
-            self.final_html = None
-            self.editable_html = None
 
-            rows = summary_records(summary)
-            self.summary_table.setRowCount(len(rows))
-            keys = [
-                "Stage",
-                "Duration",
-                "HR_min",
-                "HR_max",
-                "HR_mean",
-                "VO2_min",
-                "VO2_max",
-                "VO2_mean",
-            ]
-            for row_index, row in enumerate(rows):
-                for col, key in enumerate(keys):
-                    value = row.get(key)
-                    self.summary_table.setItem(
-                        row_index,
-                        col,
-                        QTableWidgetItem(
-                            "-" if value is None else str(value)
+            for item in self.summary_tree.get_children():
+                self.summary_tree.delete(item)
+
+            for row in summary_records(summary):
+                self.summary_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row["Stage"],
+                        row["Duration"],
+                        self._display_number(
+                            row["HR_min"]
                         ),
-                    )
+                        self._display_number(
+                            row["HR_max"]
+                        ),
+                        self._display_number(
+                            row["HR_mean"]
+                        ),
+                        self._display_number(
+                            row["VO2_min"]
+                        ),
+                        self._display_number(
+                            row["VO2_max"]
+                        ),
+                        self._display_number(
+                            row["VO2_mean"]
+                        ),
+                    ),
+                )
 
-            self.lactate_rows = initial_lactate_rows(
-                segments,
-                imported_lactate,
-                meta["max_load"],
+            self.lactate_rows = (
+                initial_lactate_rows(
+                    segments,
+                    imported_lactate,
+                    meta["max_load"],
+                )
             )
-            self.populate_lactate_table()
-            self.tabs.setCurrentIndex(2)
-            self._success("Excel 자료를 읽었습니다.")
+            self.populate_lactate_inputs()
+
+            self.notebook.select(
+                self.analysis_tab
+            )
+            self._status(
+                "Excel 자료를 읽었습니다."
+            )
         except Exception as exc:
-            self._error("Excel 읽기 오류", str(exc))
-
-    # ---------- Analysis actions ----------
-
-    def populate_lactate_table(self) -> None:
-        self.lactate_table.setRowCount(len(self.lactate_rows))
-        for row, item in enumerate(self.lactate_rows):
-            stage = QTableWidgetItem(str(item["stage"]))
-            load = QTableWidgetItem(
-                "-"
-                if item["load"] is None
-                else f"{float(item['load']):g}"
-            )
-            stage.setFlags(stage.flags() & ~Qt.ItemIsEditable)
-            load.setFlags(load.flags() & ~Qt.ItemIsEditable)
-
-            lactate = QTableWidgetItem(
-                ""
-                if item.get("lactate") is None
-                else f"{float(item['lactate']):.2f}"
+            self._error(
+                "Excel 읽기 오류",
+                str(exc),
             )
 
-            self.lactate_table.setItem(row, 0, stage)
-            self.lactate_table.setItem(row, 1, load)
-            self.lactate_table.setItem(row, 2, lactate)
+    def populate_lactate_inputs(self) -> None:
+        for child in self.lactate_frame.winfo_children():
+            child.destroy()
 
-    def collect_lactate_rows(self) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for row in range(self.lactate_table.rowCount()):
-            base = self.lactate_rows[row]
-            item = self.lactate_table.item(row, 2)
-            text = item.text().strip() if item else ""
-            lactate = None if not text else float(text)
-            rows.append(
+        headers = [
+            "Stage",
+            "Load",
+            "혈중 젖산염(mmol/L)",
+        ]
+        for col, text in enumerate(headers):
+            ttk.Label(
+                self.lactate_frame,
+                text=text,
+                font=(
+                    "Malgun Gothic",
+                    9,
+                    "bold",
+                ),
+            ).grid(
+                row=0,
+                column=col,
+                sticky="ew",
+                padx=4,
+                pady=3,
+            )
+            self.lactate_frame.columnconfigure(
+                col,
+                weight=1,
+            )
+
+        self.lactate_entries = []
+
+        for row_index, item in enumerate(
+            self.lactate_rows,
+            start=1,
+        ):
+            ttk.Label(
+                self.lactate_frame,
+                text=str(item["stage"]),
+            ).grid(
+                row=row_index,
+                column=0,
+                sticky="ew",
+                padx=4,
+                pady=2,
+            )
+            ttk.Label(
+                self.lactate_frame,
+                text=(
+                    "-"
+                    if item["load"] is None
+                    else f"{float(item['load']):g}"
+                ),
+            ).grid(
+                row=row_index,
+                column=1,
+                sticky="ew",
+                padx=4,
+                pady=2,
+            )
+
+            entry = ttk.Entry(
+                self.lactate_frame
+            )
+            if item.get("lactate") is not None:
+                entry.insert(
+                    0,
+                    f"{float(item['lactate']):.2f}",
+                )
+            entry.grid(
+                row=row_index,
+                column=2,
+                sticky="ew",
+                padx=4,
+                pady=2,
+            )
+            self.lactate_entries.append(
+                entry
+            )
+
+    def collect_lactate_rows(
+        self,
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+
+        for base, entry in zip(
+            self.lactate_rows,
+            self.lactate_entries,
+        ):
+            text = entry.get().strip()
+            if text:
+                try:
+                    lactate = float(text)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{base['stage']} 젖산값을 숫자로 입력하세요."
+                    ) from exc
+            else:
+                lactate = None
+
+            result.append(
                 {
                     "stage": base["stage"],
                     "load": base["load"],
                     "lactate": lactate,
                 }
             )
-        return rows
+
+        return result
 
     def run_analysis(self) -> None:
         if self.parsed is None:
@@ -891,294 +1974,325 @@ class MainWindow(QMainWindow):
             )
 
             unit = self.meta["load_unit"]
-            for label, key in [
-                (self.lt1_result, "LT1"),
-                (self.lt2_result, "LT2"),
+            for variable, key in [
+                (
+                    self.lt1_result_var,
+                    "LT1",
+                ),
+                (
+                    self.lt2_result_var,
+                    "LT2",
+                ),
             ]:
                 item = lt_api_item(
-                    self.analysis[key.lower()],
+                    self.analysis[
+                        key.lower()
+                    ],
                     key,
-                    self.analysis["threshold_hr"],
+                    self.analysis[
+                        "threshold_hr"
+                    ],
                     self.meta,
                 )
+
                 if not item.get("show"):
-                    label.setText(f"{key}: 표시하지 않음")
+                    variable.set(
+                        f"{key}: 표시하지 않음"
+                    )
                 elif item.get("valid"):
                     hr_text = (
                         f" | {item['hr']} bpm"
-                        if item.get("hr") is not None
+                        if item.get("hr")
+                        is not None
                         else ""
                     )
-                    label.setText(
-                        f"{key} = {item['load']:.2f} {unit}{hr_text}"
-                    )
-                    label.setStyleSheet(
-                        "background:#ECFDF3; padding:10px;"
-                        "border:1px solid #B7E4C7;"
+                    variable.set(
+                        f"{key} = "
+                        f"{item['load']:.2f} "
+                        f"{unit}{hr_text}"
                     )
                 else:
-                    label.setText(
-                        f"{key} 산출 불가: {item.get('reason', '')}"
-                    )
-                    label.setStyleSheet(
-                        "background:#FFF8E8; padding:10px;"
-                        "border:1px solid #F0D4A0;"
+                    variable.set(
+                        f"{key} 산출 불가: "
+                        f"{item.get('reason', '')}"
                     )
 
-            self._set_graph(
-                self.lactate_graph["label"],
-                self.analysis.get("lactate_png"),
+            self.lactate_graph.set_model(
+                self.analysis.get(
+                    "lactate_model"
+                )
             )
-            self._set_graph(
-                self.basic_graph["label"],
-                self.analysis.get("basic_png"),
+            self.basic_graph.set_model(
+                self.analysis.get(
+                    "basic_model"
+                )
             )
-            self._set_graph(
-                self.combined_graph["label"],
-                self.analysis.get("combined_analysis_png"),
+            self.combined_graph.set_model(
+                self.analysis.get(
+                    "combined_analysis_model"
+                )
             )
 
-            if (
-                self.analysis.get("basic_png") is not None
-                and self.analysis.get("combined_report_png") is not None
-            ):
-                (
-                    self.report_data,
-                    self.editable_html,
-                    self.final_html,
-                ) = build_report_htmls(
-                    self.parsed,
-                    self.meta,
-                    self.analysis,
-                )
-                self.report_view.setHtml(
-                    self.editable_html,
-                    QUrl.fromLocalFile(str(ROOT) + "/"),
-                )
-                self.report_status.setText(
-                    "점선 영역을 직접 수정한 뒤 수정 내용 적용을 누르세요."
-                )
-            else:
-                self.report_status.setText(
-                    "최대 심박수를 입력해야 결과지를 생성할 수 있습니다."
-                )
+            self.report_data = build_report_data(
+                self.parsed,
+                self.meta,
+                self.analysis,
+            )
+            self.render_report()
 
-            self._success("분석이 완료되었습니다.")
+            self._status(
+                "분석이 완료되었습니다."
+            )
         except Exception as exc:
-            self._error("분석 오류", str(exc))
-
-    def _set_graph(
-        self,
-        label: QLabel,
-        png: bytes | None,
-    ) -> None:
-        if not png:
-            label.setText("그래프 없음")
-            label.setPixmap(QPixmap())
-            return
-        pixmap = QPixmap()
-        pixmap.loadFromData(png)
-        label.setPixmap(
-            pixmap.scaled(
-                1250,
-                520,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+            self._error(
+                "분석 오류",
+                str(exc),
             )
-        )
 
-    # ---------- Report actions ----------
+    # ---------- Report editing/export ----------
 
-    def exec_report_command(self, command: str) -> None:
-        script = (
-            "(() => {"
-            "const s=window.getSelection();"
-            "if(!s || s.rangeCount===0 || s.isCollapsed) return false;"
-            f"document.execCommand('{command}', false, null);"
-            "return true;"
-            "})()"
-        )
-        self.report_view.page().runJavaScript(script)
-
-    def set_report_color(self, color: str) -> None:
-        script = (
-            "(() => {"
-            "const s=window.getSelection();"
-            "if(!s || s.rangeCount===0 || s.isCollapsed) return false;"
-            f"document.execCommand('foreColor', false, '{color}');"
-            "return true;"
-            "})()"
-        )
-        self.report_view.page().runJavaScript(script)
-
-    def _collect_report_comments(
+    def apply_text_style(
         self,
-        callback: Callable[[dict[str, str]], None],
+        style_name: str,
     ) -> None:
-        script = """
-        (() => {
-          const out = {};
-          document.querySelectorAll('[data-edit-key]').forEach((el) => {
-            out[el.dataset.editKey] = el.innerHTML;
-          });
-          return out;
-        })()
-        """
-        self.report_view.page().runJavaScript(
-            script,
-            lambda result: callback(
-                result if isinstance(result, dict) else {}
-            ),
+        text = self._current_report_text
+        if text is None:
+            return
+        try:
+            start = text.index("sel.first")
+            end = text.index("sel.last")
+        except tk.TclError:
+            return
+        text.tag_add(
+            style_name,
+            start,
+            end,
         )
 
-    def apply_report_edits(self) -> None:
+    def apply_text_color(
+        self,
+        color: str,
+    ) -> None:
+        text = self._current_report_text
+        if text is None:
+            return
+        try:
+            start = text.index("sel.first")
+            end = text.index("sel.last")
+        except tk.TclError:
+            return
+
+        tag = {
+            "#D7191C": "red",
+            "#2679D9": "blue",
+            "#111111": "black",
+        }.get(color, "custom")
+
+        if tag == "custom":
+            text.tag_configure(
+                tag,
+                foreground=color,
+            )
+
+        for existing in [
+            "red",
+            "blue",
+            "black",
+            "custom",
+        ]:
+            text.tag_remove(
+                existing,
+                start,
+                end,
+            )
+        text.tag_add(
+            tag,
+            start,
+            end,
+        )
+
+    def clear_text_style(self) -> None:
+        text = self._current_report_text
+        if text is None:
+            return
+        try:
+            start = text.index("sel.first")
+            end = text.index("sel.last")
+        except tk.TclError:
+            return
+
+        for tag in [
+            "bold",
+            "italic",
+            "underline",
+            "red",
+            "blue",
+            "black",
+            "custom",
+        ]:
+            text.tag_remove(
+                tag,
+                start,
+                end,
+            )
+
+    def _report_comments(
+        self,
+    ) -> dict[str, str]:
+        return {
+            key: widget.get(
+                "1.0",
+                "end-1c",
+            )
+            for key, widget in (
+                self.report_texts.items()
+            )
+        }
+
+    def _refresh_report_data_from_text(
+        self,
+    ) -> None:
         if (
             self.parsed is None
             or self.meta is None
             or self.analysis is None
         ):
-            self._error("결과지", "분석을 먼저 실행하세요.")
-            return
+            raise ValueError(
+                "분석을 먼저 실행하세요."
+            )
 
-        def done(comments: dict[str, str]) -> None:
-            try:
-                (
-                    self.report_data,
-                    self.editable_html,
-                    self.final_html,
-                ) = build_report_htmls(
-                    self.parsed,
-                    self.meta,
-                    self.analysis,
-                    comments,
-                )
-                self.report_view.setHtml(
-                    self.editable_html,
-                    QUrl.fromLocalFile(str(ROOT) + "/"),
-                )
-                self.report_status.setText(
-                    "수정 내용이 적용되었습니다."
-                )
-                self._success("결과지 수정 내용을 적용했습니다.")
-            except Exception as exc:
-                self._error("결과지 수정 오류", str(exc))
-
-        self._collect_report_comments(done)
+        self.report_data = (
+            build_report_data(
+                self.parsed,
+                self.meta,
+                self.analysis,
+                self._report_comments(),
+            )
+        )
 
     def save_report_excel(self) -> None:
-        if (
-            self.parsed is None
-            or self.meta is None
-            or self.analysis is None
-        ):
-            self._error("Excel 결과", "분석을 먼저 실행하세요.")
-            return
+        try:
+            self._refresh_report_data_from_text()
+            data = build_excel_bytes(
+                self.report_data,
+                self.parsed,
+                self.analysis,
+            )
 
-        def export(comments: dict[str, str]) -> None:
-            try:
-                report_data, editable, final = build_report_htmls(
-                    self.parsed,
-                    self.meta,
-                    self.analysis,
-                    comments,
-                )
-                self.report_data = report_data
-                self.editable_html = editable
-                self.final_html = final
+            default_name = (
+                f"{self.meta['test_date']}_"
+                f"{self.meta['athlete']['name']}_결과.xlsx"
+            )
+            path = filedialog.asksaveasfilename(
+                title="Excel 결과 저장",
+                initialfile=default_name,
+                defaultextension=".xlsx",
+                filetypes=[
+                    (
+                        "Excel Workbook",
+                        "*.xlsx",
+                    )
+                ],
+            )
+            if not path:
+                return
 
-                data = build_excel_bytes(
-                    report_data,
-                    self.parsed,
-                    self.analysis,
-                )
-                default_name = (
-                    f"{self.meta['test_date']}_"
-                    f"{self.meta['athlete']['name']}_결과.xlsx"
-                )
-                path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    "Excel 결과 저장",
-                    str(ROOT / default_name),
-                    "Excel Workbook (*.xlsx)",
-                )
-                if not path:
-                    return
-                Path(path).write_bytes(data)
-                self._success("Excel 결과를 저장했습니다.")
-            except Exception as exc:
-                self._error("Excel 결과 저장 오류", str(exc))
-
-        self._collect_report_comments(export)
+            Path(path).write_bytes(data)
+            self._status(
+                "Excel 결과를 저장했습니다."
+            )
+        except Exception as exc:
+            self._error(
+                "Excel 결과 저장 오류",
+                str(exc),
+            )
 
     def save_report_pdf(self) -> None:
-        if (
-            self.parsed is None
-            or self.meta is None
-            or self.analysis is None
-        ):
-            self._error("PDF 결과", "분석을 먼저 실행하세요.")
-            return
+        try:
+            self._refresh_report_data_from_text()
 
-        def print_pdf(comments: dict[str, str]) -> None:
-            try:
-                (
-                    self.report_data,
-                    _editable,
-                    final_html,
-                ) = build_report_htmls(
-                    self.parsed,
-                    self.meta,
-                    self.analysis,
-                    comments,
-                )
-                self.final_html = final_html
+            default_name = (
+                f"{self.meta['test_date']}_"
+                f"{self.meta['athlete']['name']}_피드백.pdf"
+            )
+            path = filedialog.asksaveasfilename(
+                title="PDF 결과지 저장",
+                initialfile=default_name,
+                defaultextension=".pdf",
+                filetypes=[
+                    ("PDF", "*.pdf")
+                ],
+            )
+            if not path:
+                return
 
-                default_name = (
-                    f"{self.meta['test_date']}_"
-                    f"{self.meta['athlete']['name']}_피드백.pdf"
-                )
-                path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    "PDF 결과지 저장",
-                    str(ROOT / default_name),
-                    "PDF (*.pdf)",
-                )
-                if not path:
-                    return
+            save_report_pdf(
+                path,
+                self.report_data,
+                self.analysis,
+            )
+            self._status(
+                "PDF 결과지를 저장했습니다."
+            )
+        except Exception as exc:
+            self._error(
+                "PDF 결과지 저장 오류",
+                str(exc),
+            )
 
-                page = QWebEnginePage(
-                    self.report_view.page().profile(),
-                    self,
-                )
+    # ---------- Helpers ----------
 
-                def do_print(ok: bool) -> None:
-                    if not ok:
-                        self._error(
-                            "PDF 결과",
-                            "PDF용 결과지 HTML을 불러오지 못했습니다.",
-                        )
-                        page.deleteLater()
-                        return
+    @staticmethod
+    def _float(
+        value: str,
+        label: str,
+    ) -> float:
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"{label} 값을 숫자로 입력하세요."
+            ) from exc
 
-                    def finished(file_path: str, success: bool) -> None:
-                        if success:
-                            self._success("PDF 결과지를 저장했습니다.")
-                        else:
-                            self._error(
-                                "PDF 결과",
-                                "PDF 결과지 저장에 실패했습니다.",
-                            )
-                        page.deleteLater()
+    @staticmethod
+    def _int(
+        value: str,
+        label: str,
+    ) -> int:
+        try:
+            return int(
+                round(float(value))
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"{label} 값을 숫자로 입력하세요."
+            ) from exc
 
-                    page.pdfPrintingFinished.connect(finished)
-                    page.printToPdf(path)
+    @staticmethod
+    def _display_number(
+        value: Any,
+    ) -> str:
+        if value is None:
+            return "-"
+        try:
+            number = float(value)
+            return f"{number:.2f}"
+        except (TypeError, ValueError):
+            return str(value)
 
-                page.loadFinished.connect(do_print)
-                page.setHtml(
-                    final_html,
-                    QUrl.fromLocalFile(str(ROOT) + "/"),
-                )
-            except Exception as exc:
-                self._error("PDF 결과 저장 오류", str(exc))
+    def _status(
+        self,
+        message: str,
+    ) -> None:
+        self.status_var.set(message)
 
-        self._collect_report_comments(print_pdf)
+    def _error(
+        self,
+        title: str,
+        message: str,
+    ) -> None:
+        messagebox.showerror(
+            title,
+            message,
+            parent=self,
+        )
