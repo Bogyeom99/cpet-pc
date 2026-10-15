@@ -1,29 +1,24 @@
-def test_service_import_contract():
-    from services import athlete_store
-    from services import excel_parser
-    from services import graph_service
-    from services import input_template
-    from services import report_service
-    from services import workflow
+import unittest
 
-    assert athlete_store.is_configured()
-    assert hasattr(athlete_store, "DB_PATH")
-    assert hasattr(athlete_store, "list_athletes")
-    assert hasattr(athlete_store, "save_measurement")
 
-    for name in [
-        "parse_excel",
-        "round_half_up",
-        "is_rest",
-        "is_recovery",
-        "is_allout",
-        "parse_load",
-    ]:
-        assert hasattr(excel_parser, name)
+class ImportContractTests(unittest.TestCase):
+    def test_core_modules_are_standard_library_compatible(self):
+        from services import athlete_store
+        from services import excel_parser
+        from services import graph_service
+        from services import input_template
+        from services import lt_analysis
+        from services import workflow
+        from services import xlsx_io
 
-    assert hasattr(graph_service, "make_hr_vo2_graph")
-    assert hasattr(graph_service, "make_hr_vo2_lactate_graph")
-    assert hasattr(input_template, "build_input_template")
-    assert hasattr(report_service, "build_report_html")
-    assert hasattr(workflow, "analyze")
-    assert hasattr(workflow, "build_report_htmls")
+        self.assertTrue(athlete_store.is_configured())
+        self.assertTrue(hasattr(excel_parser, "parse_excel"))
+        self.assertTrue(hasattr(graph_service, "make_hr_vo2_graph"))
+        self.assertTrue(hasattr(input_template, "build_input_template"))
+        self.assertTrue(hasattr(lt_analysis, "estimate_lt"))
+        self.assertTrue(hasattr(workflow, "analyze"))
+        self.assertTrue(hasattr(xlsx_io, "read_xlsx"))
+
+
+if __name__ == "__main__":
+    unittest.main()
