@@ -15,6 +15,10 @@ jobs:
       matrix:
         python-version: ["3.12", "3.14"]
 
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QTWEBENGINE_DISABLE_SANDBOX: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,11 +32,11 @@ jobs:
           pip install -r requirements.txt pytest
 
       - name: Compile Python files
-        run: python -m py_compile app.py services/*.py tests/*.py
+        run: python -m py_compile main.py services/*.py ui/*.py tests/*.py
 
-      - name: Verify local-only imports
+      - name: Verify desktop and local-only imports
         run: |
-          python -c "from app import app; print(app.url_map)"
+          python -c "from ui.main_window import MainWindow, LocalOnlyInterceptor; print(MainWindow.__name__)"
           python -c "from services import athlete_store; assert athlete_store.is_configured(); print(athlete_store.DB_PATH)"
           python -c "from services import workflow; assert hasattr(workflow, 'analyze')"
 

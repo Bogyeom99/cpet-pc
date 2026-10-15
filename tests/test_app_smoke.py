@@ -1,13 +1,12 @@
-from app import app
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 
-def test_flask_app_starts_without_external_services():
-    client = app.test_client()
+def test_desktop_application_imports_without_web_server():
+    from ui.main_window import MainWindow
+    from services import athlete_store
 
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "NGC CPET" in response.get_data(as_text=True)
-
-    athletes = client.get("/api/athletes")
-    assert athletes.status_code == 200
-    assert athletes.get_json()["ok"] is True
+    assert MainWindow.__name__ == "MainWindow"
+    assert athlete_store.is_configured()
