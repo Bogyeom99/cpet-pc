@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Compile Python files
+        run: python -m py_compile streamlit_app.py services/*.py tests/*.py
+
+      - name: Verify local storage and component API
+        run: |
+          python -c "from services import athlete_store; assert athlete_store.is_configured(); print(athlete_store.DB_PATH)"
+          python -c "from services import excel_parser; assert hasattr(excel_parser, 'parse_excel')"
+          python -c "import streamlit as st; assert hasattr(st.components, 'v2')"
+
+      - name: Run tests
+        env:
+          PYTHONPATH: .
+        run: pytest -q
