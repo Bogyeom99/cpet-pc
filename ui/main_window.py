@@ -1146,10 +1146,9 @@ class MainWindow(QMainWindow):
                 if not path:
                     return
 
-                page = QWebEnginePage(self.report_view.profile(), self)
-                page.setHtml(
-                    final_html,
-                    QUrl.fromLocalFile(str(ROOT) + "/"),
+                page = QWebEnginePage(
+                    self.report_view.page().profile(),
+                    self,
                 )
 
                 def do_print(ok: bool) -> None:
@@ -1175,6 +1174,10 @@ class MainWindow(QMainWindow):
                     page.printToPdf(path)
 
                 page.loadFinished.connect(do_print)
+                page.setHtml(
+                    final_html,
+                    QUrl.fromLocalFile(str(ROOT) + "/"),
+                )
             except Exception as exc:
                 self._error("PDF 결과 저장 오류", str(exc))
 
