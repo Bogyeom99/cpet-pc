@@ -3,9 +3,6 @@ from __future__ import annotations
 import math
 from typing import Any
 
-import numpy as np
-import pandas as pd
-
 from services import excel_parser
 from services.excel_export import build_excel_export
 from services.graph_service import (
@@ -14,7 +11,6 @@ from services.graph_service import (
     make_lactate_graph,
 )
 from services.lt_analysis import LactatePoint, estimate_lt
-from services.report_service import build_report_html
 
 
 round_half_up = excel_parser.round_half_up
@@ -43,32 +39,25 @@ def format_duration(sec: float) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
-def clean_json_value(value: Any) -> Any:
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating,)):
-        value = float(value)
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if pd.isna(value):
-        return None
-    return value
-
-
-def summary_records(summary: pd.DataFrame) -> list[dict[str, Any]]:
+def summary_records(
+    summary: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for _, row in summary.iterrows():
-        item: dict[str, Any] = {
-            "Stage": clean_json_value(row.get("Stage")),
-            "Duration": format_duration(row.get("Duration_sec", 0)),
-            "HR_min": clean_json_value(row.get("HR_min")),
-            "HR_max": clean_json_value(row.get("HR_max")),
-            "HR_mean": clean_json_value(row.get("HR_mean")),
-            "VO2_min": clean_json_value(row.get("VO2_min")),
-            "VO2_max": clean_json_value(row.get("VO2_max")),
-            "VO2_mean": clean_json_value(row.get("VO2_mean")),
-        }
-        rows.append(item)
+    for row in summary:
+        rows.append(
+            {
+                "Stage": row.get("Stage"),
+                "Duration": format_duration(
+                    row.get("Duration_sec", 0)
+                ),
+                "HR_min": row.get("HR_min"),
+                "HR_max": row.get("HR_max"),
+                "HR_mean": row.get("HR_mean"),
+                "VO2_min": row.get("VO2_min"),
+                "VO2_max": row.get("VO2_max"),
+                "VO2_mean": row.get("VO2_mean"),
+            }
+        )
     return rows
 
 
@@ -116,15 +105,22 @@ def initial_lactate_rows(
             allout_lactate = value
             continue
         if is_recovery(stage_name):
-            recovery_lactate_map[stage_name.lower()] = value
+            recovery_lactate_map[
+                stage_name.lower()
+            ] = value
             continue
 
         load_value = parse_load(stage_name)
         if load_value is not None:
-            lactate_by_load[round(float(load_value), 6)] = value
+            lactate_by_load[
+                round(float(load_value), 6)
+            ] = value
 
     rows: list[dict[str, Any]] = []
-    has_rest = any(segment.is_rest for segment in segments)
+    has_rest = any(
+        segment.is_rest
+        for segment in segments
+    )
     if has_rest or rest_lactate is not None:
         rows.append(
             {
@@ -155,7 +151,11 @@ def initial_lactate_rows(
         allout_load = (
             float(allout_segment.load)
             if allout_segment.load is not None
-            else (float(max_load) if max_load > 0 else None)
+            else (
+                float(max_load)
+                if max_load > 0
+                else None
+            )
         )
         allout_value = allout_lactate
         if allout_value is None and allout_load is not None:
@@ -187,6 +187,7 @@ def initial_lactate_rows(
         for row in rows
         if is_recovery(row["stage"])
     }
+
     for item in imported_lactate:
         label = str(item.get("stage", "")).strip()
         if (
@@ -219,6 +220,7 @@ def analyze(
 
         lactate = float(raw_lactate)
         stage = str(row.get("stage", "")).strip()
+
         raw_load = row.get("load")
         load = (
             None
@@ -253,7 +255,7 @@ def analyze(
         bool(meta.get("show_lt2", True)),
     )
 
-    lactate_png = (
+    lactate_model = (
         make_lactate_graph(chart_points)
         if chart_points
         else None
@@ -270,14 +272,17 @@ def analyze(
         else None
     )
 
-    basic_png = None
-    combined_analysis_png = None
-    combined_report_png = None
-    threshold_hr = {"LT1": None, "LT2": None}
+    basic_model = None
+    combined_analysis_model = None
+    combined_report_model = None
+    threshold_hr = {
+        "LT1": None,
+        "LT2": None,
+    }
 
     if float(meta.get("hrmax") or 0) > 0:
-        basic_png, _ = make_hr_vo2_graph(
-            parsed["df"],
+        basic_model, _ = make_hr_vo2_graph(
+            parsed["rows"],
             parsed["segments"],
             float(meta["hrmax"]),
             None,
@@ -285,10 +290,10 @@ def analyze(
         )
 
         (
-            combined_analysis_png,
+            combined_analysis_model,
             threshold_hr,
         ) = make_hr_vo2_lactate_graph(
-            parsed["df"],
+            parsed["rows"],
             parsed["segments"],
             float(meta["hrmax"]),
             chart_points,
@@ -297,8 +302,11 @@ def analyze(
             lt_label_mode="report",
         )
 
-        combined_report_png, _ = make_hr_vo2_lactate_graph(
-            parsed["df"],
+        (
+            combined_report_model,
+            _,
+        ) = make_hr_vo2_lactate_graph(
+            parsed["rows"],
             parsed["segments"],
             float(meta["hrmax"]),
             chart_points,
@@ -311,10 +319,10 @@ def analyze(
         "lt1": lt1,
         "lt2": lt2,
         "chart_points": chart_points,
-        "basic_png": basic_png,
-        "combined_analysis_png": combined_analysis_png,
-        "combined_report_png": combined_report_png,
-        "lactate_png": lactate_png,
+        "basic_model": basic_model,
+        "combined_analysis_model": combined_analysis_model,
+        "combined_report_model": combined_report_model,
+        "lactate_model": lactate_model,
         "threshold_hr": threshold_hr,
     }
 
@@ -333,6 +341,7 @@ def lt_api_item(
         }
 
     hr = threshold_hr.get(key)
+
     if result.valid:
         return {
             "name": key,
@@ -346,7 +355,10 @@ def lt_api_item(
             ),
             "pct_hrmax": (
                 float(hr) / float(meta["hrmax"]) * 100
-                if hr is not None and float(meta.get("hrmax") or 0) > 0
+                if (
+                    hr is not None
+                    and float(meta.get("hrmax") or 0) > 0
+                )
                 else None
             ),
         }
@@ -366,9 +378,13 @@ def _report_lt_item(
     meta: dict[str, Any],
 ) -> dict[str, Any]:
     if not result:
-        return {"name": key, "show": False}
+        return {
+            "name": key,
+            "show": False,
+        }
 
     hr = threshold_hr.get(key)
+
     if result.valid and hr is not None:
         return {
             "name": key,
@@ -399,7 +415,10 @@ def _default_lt_comment(
     if not item.get("valid"):
         return f"산출 불가: {item.get('reason', '')}"
 
-    zone = zone_for_hr(item["hr"], meta["hrmax"])
+    zone = zone_for_hr(
+        item["hr"],
+        meta["hrmax"],
+    )
     load_word = (
         "속도"
         if meta["load_type"] == "Speed"
@@ -462,28 +481,19 @@ def build_report_data(
     summary = parsed["summary"]
     stages: list[dict[str, Any]] = []
 
-    for _, row in summary.iterrows():
-        hr_mean = pd.to_numeric(
-            row.get("HR_mean"),
-            errors="coerce",
-        )
-        hr_min = pd.to_numeric(
-            row.get("HR_min"),
-            errors="coerce",
-        )
-        hr_max_value = pd.to_numeric(
-            row.get("HR_max"),
-            errors="coerce",
-        )
+    for row in summary:
+        hr_mean = row.get("HR_mean")
+        hr_min = row.get("HR_min")
+        hr_max_value = row.get("HR_max")
 
         if (
-            pd.isna(hr_mean)
-            or pd.isna(hr_min)
-            or pd.isna(hr_max_value)
+            hr_mean is None
+            or hr_min is None
+            or hr_max_value is None
         ):
             stages.append(
                 {
-                    "stage": row["Stage"],
+                    "stage": row.get("Stage", ""),
                     "hr_range": "-",
                     "hr_mean": "-",
                     "zone": "-",
@@ -493,7 +503,7 @@ def build_report_data(
 
         stages.append(
             {
-                "stage": row["Stage"],
+                "stage": row.get("Stage", ""),
                 "hr_range": (
                     f"{round_half_up(hr_min)}-"
                     f"{round_half_up(hr_max_value)}"
@@ -507,7 +517,7 @@ def build_report_data(
         )
 
     zones: list[dict[str, Any]] = []
-    for idx, (low, high) in enumerate(
+    for index, (low, high) in enumerate(
         [
             (0.50, 0.60),
             (0.60, 0.70),
@@ -519,8 +529,11 @@ def build_report_data(
     ):
         zones.append(
             {
-                "name": f"Zone {idx}",
-                "pct": f"{int(low * 100)}-{int(high * 100)}",
+                "name": f"Zone {index}",
+                "pct": (
+                    f"{int(low * 100)}-"
+                    f"{int(high * 100)}"
+                ),
                 "range": (
                     f"{round_half_up(float(meta['hrmax']) * low)}-"
                     f"{round_half_up(float(meta['hrmax']) * high)}"
@@ -542,8 +555,9 @@ def build_report_data(
     )
 
     valid_loads = [
-        float(value)
-        for value in summary["Load"].dropna().tolist()
+        float(row["Load"])
+        for row in summary
+        if row.get("Load") is not None
     ]
     first_load = (
         valid_loads[0]
@@ -565,11 +579,13 @@ def build_report_data(
         protocol_text = (
             f"프로토콜(시작 {first_load:g} {meta['load_unit']}"
         )
+
     if increment > 0:
         protocol_text += (
             f", {float(meta['stage_duration_min']):g}분마다 "
             f"{increment:g} {meta['load_unit']} 증가"
         )
+
     protocol_text += (
         ")을 통한 운동부하검사 결과, "
         f"{meta['athlete']['name']} 선수의 최대심박수 "
@@ -585,6 +601,7 @@ def build_report_data(
         ),
         None,
     )
+
     if rest_point:
         lactate_default = (
             f"젖산 역치 측정 결과 {meta['athlete']['name']} 선수의 "
@@ -614,6 +631,7 @@ def build_report_data(
             meta,
         ),
     }
+
     if comments:
         for key in defaults:
             value = comments.get(key)
@@ -652,35 +670,6 @@ def build_report_data(
         "lt2": lt2_item,
         **defaults,
     }
-
-
-def build_report_htmls(
-    parsed: dict[str, Any],
-    meta: dict[str, Any],
-    analysis: dict[str, Any],
-    comments: dict[str, str] | None = None,
-) -> tuple[dict[str, Any], str, str]:
-    report_data = build_report_data(
-        parsed,
-        meta,
-        analysis,
-        comments,
-    )
-
-    editable_html = build_report_html(
-        report_data,
-        analysis["basic_png"],
-        analysis["lactate_png"],
-        analysis["combined_report_png"],
-        editable=True,
-    )
-    final_html = build_report_html(
-        report_data,
-        analysis["basic_png"],
-        analysis["lactate_png"],
-        analysis["combined_report_png"],
-    )
-    return report_data, editable_html, final_html
 
 
 def build_excel_bytes(
