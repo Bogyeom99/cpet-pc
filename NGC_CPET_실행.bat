@@ -12,13 +12,13 @@ if not exist ".venv\Scripts\python.exe" (
 if not exist "data" mkdir data
 
 echo NGC CPET PC를 실행합니다.
-echo 브라우저 주소: http://localhost:8501
+echo.
+echo 브라우저 주소: http://127.0.0.1:8501
+echo 선수 정보와 측정 자료는 이 PC 안에서만 처리됩니다.
 echo 프로그램을 종료하려면 이 창에서 Ctrl+C를 누르세요.
 echo.
 
-start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 2; Start-Process 'http://localhost:8501'"
-
-".venv\Scripts\python.exe" -m streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
+".venv\Scripts\python.exe" app.py
 
 echo.
 echo NGC CPET PC가 종료되었습니다.

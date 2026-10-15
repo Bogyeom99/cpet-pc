@@ -28,13 +28,13 @@ jobs:
           pip install -r requirements.txt pytest
 
       - name: Compile Python files
-        run: python -m py_compile streamlit_app.py services/*.py tests/*.py
+        run: python -m py_compile app.py services/*.py tests/*.py
 
-      - name: Verify local storage and component API
+      - name: Verify local-only imports
         run: |
+          python -c "from app import app; print(app.url_map)"
           python -c "from services import athlete_store; assert athlete_store.is_configured(); print(athlete_store.DB_PATH)"
-          python -c "from services import excel_parser; assert hasattr(excel_parser, 'parse_excel')"
-          python -c "import streamlit as st; assert hasattr(st.components, 'v2')"
+          python -c "from services import workflow; assert hasattr(workflow, 'analyze')"
 
       - name: Run tests
         env:
